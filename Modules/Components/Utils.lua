@@ -399,77 +399,97 @@ if BuildToC < 50500 then
 elseif BuildToC < 100000 then
 	-- MOP - Shadowlands
 	local TalentMap 					= {}; A.TalentMap = TalentMap
-	local C_SpecializationInfo			= _G.C_SpecializationInfo
-	local GetTalentInfo 				= C_SpecializationInfo and C_SpecializationInfo.GetTalentInfo or _G.GetTalentInfo
-	local GetPvpTalentInfoByID 			= _G.GetPvpTalentInfoByID
-	local GetAllSelectedPvpTalentIDs 	= C_SpecializationInfo and C_SpecializationInfo.GetAllSelectedPvpTalentIDs	
-	
-	local MAX_NUM_TALENT_TIERS 			= _G.MAX_NUM_TALENT_TIERS
-	local NUM_TALENT_COLUMNS 			= _G.NUM_TALENT_COLUMNS
-	
+	local C_SpecializationInfo = _G.C_SpecializationInfo
+	local GetTalentInfo = C_SpecializationInfo and C_SpecializationInfo.GetTalentInfo or _G.GetTalentInfo
+	local GetPvpTalentInfoByID = _G.GetPvpTalentInfoByID
+	local GetAllSelectedPvpTalentIDs = C_SpecializationInfo and C_SpecializationInfo.GetAllSelectedPvpTalentIDs
+	local MAX_NUM_TALENT_TIERS = _G.MAX_NUM_TALENT_TIERS
+	local NUM_TALENT_COLUMNS = _G.NUM_TALENT_COLUMNS
 	local talentInfoQuery = {}
-	local function TalentMapUpdate()
-		wipe(TalentMap)
-		wipe(talentInfoQuery)
-		
-		local talentInfo
+	local tmpMap = {}
+	local lastFingerprint
+	local throttleTimer, throttlePending
+
+	local function BuildMapAndFingerprint(out)
+		wipe(out)
+		local parts = {}
+
 		for tier = 1, MAX_NUM_TALENT_TIERS do
 			for column = 1, NUM_TALENT_COLUMNS do
 				talentInfoQuery.tier = tier
 				talentInfoQuery.column = column
-				talentInfo = GetTalentInfo(talentInfoQuery)
-				-- isExceptional @boolean
-				-- talentID @number
-				-- known @boolean
-				-- maxRank @number
-				-- hasGoldBorder @boolean
-				-- tier @number
-				-- selected @boolean
-				-- icon @number
-				-- grantedByAura @boolean
-				-- meetsPreviewPrereq @boolean
-				-- previewRank @number
-				-- meetsPrereq @boolean
-				-- name @string
-				-- isPVPTalentUnlocked @boolean
-				-- column @number
-				-- rank @number
-				-- available @boolean
-				-- spellID @number	
-				if talentInfo and (talentInfo.selected or talentInfo.grantedByAura) then
-					TalentMap[talentInfo.name] = talentInfo.rank or 1
-					TalentMap[talentInfo.spellID] = talentInfo.rank or 1
-					TalentMap[talentInfo.talentID] = talentInfo.rank or 1
+				local info = GetTalentInfo(talentInfoQuery)
+				if info and (info.selected or info.grantedByAura) then
+					out[info.name] = info.rank or 1
+					out[info.spellID] = info.rank or 1
+					out[info.talentID] = info.rank or 1
+					parts[#parts + 1] = (info.talentID or 0) .. ":" .. (info.rank or 1)
 				end
 			end
 		end
-		
-		local _, name, ids
-		if GetPvpTalentInfoByID then
-			ids = GetAllSelectedPvpTalentIDs()
-			for _, id in pairs(ids) do
-				_, name = GetPvpTalentInfoByID(id)
-				if name then
-					TalentMap[name] = true
-					TalentMap[id] = true
+
+		if GetPvpTalentInfoByID and GetAllSelectedPvpTalentIDs then
+			local ids = GetAllSelectedPvpTalentIDs()
+			if ids then
+				table.sort(ids)
+				for i = 1, #ids do
+					local id = ids[i]
+					local _, name = GetPvpTalentInfoByID(id)
+					if name then out[name] = true end
+					out[id] = true
+					parts[#parts + 1] = "P:" .. id
 				end
 			end
-		end	
-		
-		TMW:Fire("TMW_ACTION_TALENT_MAP_UPDATED")
-		Listener:Remove("ACTION_EVENT_UTILS_TALENT_MAP", "PLAYER_ENTERING_WORLD")
+		end
+
+		table.sort(parts)
+		return table.concat(parts, ";")
 	end
 
-	Listener:Add("ACTION_EVENT_UTILS_TALENT_MAP", "PLAYER_ENTERING_WORLD", 				TalentMapUpdate)
-	Listener:Add("ACTION_EVENT_UTILS_TALENT_MAP", "ACTIVE_TALENT_GROUP_CHANGED", 		TalentMapUpdate)
-	Listener:Add("ACTION_EVENT_UTILS_TALENT_MAP", "PLAYER_TALENT_UPDATE", 				TalentMapUpdate)
-	-- Legion: Registers events for pvp talents
-	if BuildToC >= 70003 then		
-		Listener:Add("ACTION_EVENT_UTILS_TALENT_MAP", "PLAYER_PVP_TALENT_UPDATE", 		TalentMapUpdate)
+	local function TalentMapUpdateIfChanged()
+		local fp = BuildMapAndFingerprint(tmpMap)
+		if fp == lastFingerprint then
+			return
+		end
+		lastFingerprint = fp
+
+		wipe(TalentMap)
+		for k, v in pairs(tmpMap) do
+			TalentMap[k] = v
+		end
+
+		if TMW then
+			TMW:Fire("TMW_ACTION_TALENT_MAP_UPDATED")
+		end
+		if Listener then
+			Listener:Remove("ACTION_EVENT_UTILS_TALENT_MAP", "PLAYER_ENTERING_WORLD")
+		end
 	end
-	-- SL: Registers events for Torghast 
-	if BuildToC >= 90001 then 
-		Listener:Add("ACTION_EVENT_UTILS_TALENT_MAP", "ANIMA_DIVERSION_TALENT_UPDATED", TalentMapUpdate)
+
+	local function TalentsEventHandler()
+		if throttleTimer then
+			throttlePending = true
+			return
+		end
+		throttlePending = false
+		throttleTimer = C_Timer.NewTimer(0.2, function()
+			throttleTimer = nil
+			TalentMapUpdateIfChanged()
+			if throttlePending then
+				throttlePending = false
+				TalentMapUpdateIfChanged()
+			end
+		end)
+	end
+
+	Listener:Add("ACTION_EVENT_UTILS_TALENT_MAP", "PLAYER_ENTERING_WORLD", TalentsEventHandler)
+	Listener:Add("ACTION_EVENT_UTILS_TALENT_MAP", "ACTIVE_TALENT_GROUP_CHANGED", TalentsEventHandler)
+	Listener:Add("ACTION_EVENT_UTILS_TALENT_MAP", "PLAYER_TALENT_UPDATE", TalentsEventHandler)
+	if BuildToC >= 70003 then
+		Listener:Add("ACTION_EVENT_UTILS_TALENT_MAP", "PLAYER_PVP_TALENT_UPDATE", TalentsEventHandler)
+	end
+	if BuildToC >= 90001 then
+		Listener:Add("ACTION_EVENT_UTILS_TALENT_MAP", "ANIMA_DIVERSION_TALENT_UPDATED", TalentsEventHandler)
 	end
 else
 	-- Retail: DF+
